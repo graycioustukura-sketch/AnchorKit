@@ -921,12 +921,78 @@ impl AnchorKitContract {
         };
 
         Storage::set_health_status(&env, &anchor, &status);
+
+        // Auto-deactivate when consecutive failures exceed the failure threshold.
+        // Reads HealthFailureThreshold — entirely separate from HealthScoreThreshold.
+        let failure_threshold = Storage::get_health_failure_threshold(&env);
+        if failure_threshold > 0 && failure_count >= failure_threshold {
+            if let Some(mut metadata) = Storage::get_anchor_metadata(&env, &anchor) {
+                metadata.is_active = false;
+                Storage::set_anchor_metadata(&env, &metadata);
+            }
+        }
+
         Ok(())
     }
 
     /// Get health status for an anchor.
     pub fn get_health_status(env: Env, anchor: Address) -> Option<HealthStatus> {
         Storage::get_health_status(&env, &anchor)
+    }
+
+    /// Set the maximum number of consecutive failures before an anchor is
+    /// auto-deactivated. Stored under `HealthFailureThreshold` — completely
+    /// independent of the minimum-score threshold (#1161).
+    pub fn set_health_failure_threshold(env: Env, threshold: u32) -> Result<(), Error> {
+        let admin = Storage::get_admin(&env)?;
+        admin.require_auth();
+        Storage::set_health_failure_threshold(&env, threshold);
+        Ok(())
+    }
+
+    /// Set the minimum acceptable 0-100 health score. Stored under
+    /// `HealthScoreThreshold` — completely independent of the failure-count
+    /// threshold (#1161). Values above 100 are rejected.
+    pub fn set_health_score_threshold(env: Env, threshold: u32) -> Result<(), Error> {
+        let admin = Storage::get_admin(&env)?;
+        admin.require_auth();
+        if threshold > 100 {
+            return Err(Error::InvalidAnchorMetadata);
+        }
+        Storage::set_health_score_threshold(&env, threshold);
+        Ok(())
+    }
+
+    /// Compute a 0-100 health score for an anchor and enforce the minimum-score
+    /// threshold set by `set_health_score_threshold`. Panics with
+    /// `ValidationError` when the computed score falls below that threshold.
+    ///
+    /// Reads `HealthScoreThreshold` — entirely separate from
+    /// `HealthFailureThreshold` used by `update_health_status` (#1161).
+    pub fn get_anchor_health_score(env: Env, anchor: Address) -> Result<u32, Error> {
+        let status = Storage::get_health_status(&env, &anchor).ok_or(Error::AttestorNotRegistered)?;
+
+        // Simple composite score: weight availability 60%, invert latency 40%.
+        // Availability is stored in basis-points (0-10000); normalise to 0-100.
+        let availability_score = status.availability_percent / 100; // 0-100
+        let latency_score: u32 = if status.latency_ms == 0 {
+            100
+        } else if status.latency_ms >= 10_000 {
+            0
+        } else {
+            // 0 ms → 100, 10 000 ms → 0 (linear)
+            (100u64.saturating_sub(status.latency_ms / 100)) as u32
+        };
+
+        let final_score = (availability_score * 60 + latency_score * 40) / 100;
+
+        // Enforce minimum-score gate using the *score* threshold only (#1161).
+        let score_threshold = Storage::get_health_score_threshold(&env);
+        if score_threshold > 0 && final_score < score_threshold {
+            return Err(Error::ValidationError);
+        }
+
+        Ok(final_score)
     }
 
     /// Route a transaction request to the best anchor based on strategy.

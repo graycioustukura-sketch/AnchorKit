@@ -31,6 +31,12 @@ enum StorageKey {
     ContractConfig,
     SessionConfig,
     HealthStatus(Address),
+    /// Maximum consecutive failures before an anchor is auto-deactivated.
+    /// Written/read by set_health_failure_threshold and update_health_status.
+    HealthFailureThreshold,
+    /// Minimum acceptable 0-100 health score returned by get_anchor_health_score.
+    /// Written/read by set_health_score_threshold and get_anchor_health_score.
+    HealthScoreThreshold,
     CredentialPolicy(Address),
     SecureCredential(Address),
     AnchorMetadata(Address),
@@ -76,6 +82,12 @@ impl StorageKey {
             StorageKey::SessionConfig => (soroban_sdk::symbol_short!("SESSCFG"),).into_val(env),
             StorageKey::HealthStatus(addr) => {
                 (soroban_sdk::symbol_short!("HEALTH"), addr).into_val(env)
+            }
+            StorageKey::HealthFailureThreshold => {
+                (soroban_sdk::symbol_short!("HLTH_FT"),).into_val(env)
+            }
+            StorageKey::HealthScoreThreshold => {
+                (soroban_sdk::symbol_short!("HLTH_ST"),).into_val(env)
             }
             StorageKey::CredentialPolicy(addr) => {
                 (soroban_sdk::symbol_short!("CREDPOL"), addr).into_val(env)
@@ -429,6 +441,38 @@ impl Storage {
     pub fn get_health_status(env: &Env, anchor: &Address) -> Option<HealthStatus> {
         let key = StorageKey::HealthStatus(anchor.clone()).to_storage_key(env);
         env.storage().persistent().get(&key)
+    }
+
+    /// Persist the maximum consecutive-failure count before auto-deactivation.
+    /// Semantically distinct from the health-score threshold — uses its own key.
+    pub fn set_health_failure_threshold(env: &Env, threshold: u32) {
+        let key = StorageKey::HealthFailureThreshold.to_storage_key(env);
+        env.storage().instance().set(&key, &threshold);
+        env.storage()
+            .instance()
+            .extend_ttl(Self::INSTANCE_LIFETIME, Self::INSTANCE_LIFETIME);
+    }
+
+    /// Read the maximum consecutive-failure count threshold (0 = disabled).
+    pub fn get_health_failure_threshold(env: &Env) -> u32 {
+        let key = StorageKey::HealthFailureThreshold.to_storage_key(env);
+        env.storage().instance().get(&key).unwrap_or(0u32)
+    }
+
+    /// Persist the minimum acceptable 0-100 health score.
+    /// Semantically distinct from the failure-count threshold — uses its own key.
+    pub fn set_health_score_threshold(env: &Env, threshold: u32) {
+        let key = StorageKey::HealthScoreThreshold.to_storage_key(env);
+        env.storage().instance().set(&key, &threshold);
+        env.storage()
+            .instance()
+            .extend_ttl(Self::INSTANCE_LIFETIME, Self::INSTANCE_LIFETIME);
+    }
+
+    /// Read the minimum acceptable health score (0 = no minimum enforced).
+    pub fn get_health_score_threshold(env: &Env) -> u32 {
+        let key = StorageKey::HealthScoreThreshold.to_storage_key(env);
+        env.storage().instance().get(&key).unwrap_or(0u32)
     }
 
     pub fn set_credential_policy(env: &Env, policy: &CredentialPolicy) {
