@@ -543,6 +543,29 @@ impl AnchorKitContract {
         Storage::get_quote(&env, &anchor, quote_id).ok_or(Error::QuoteNotFound)
     }
 
+    /// List attestations for a subject with pagination.
+    ///
+    /// Returns up to `limit` attestations for `subject` starting at `offset`.
+    /// Every attestation entry and its corresponding subject-index entry have their
+    /// TTL extended on read, so actively-paginated attestations don't silently expire
+    /// — the same guarantee provided by `get_attestation`'s #630 fix.
+    pub fn list_attestations(
+        env: Env,
+        subject: Address,
+        offset: u64,
+        limit: u32,
+    ) -> Vec<Attestation> {
+        let total = Storage::get_subject_attestation_count(&env, &subject);
+        let end = (offset + limit as u64).min(total);
+        let mut results: Vec<Attestation> = Vec::new(&env);
+        for i in offset..end {
+            if let Some(attestation) = Storage::get_subject_attestation_at(&env, &subject, i) {
+                results.push_back(attestation);
+            }
+        }
+        results
+    }
+
     /// Compare rates for specific anchors and return the best option.
     pub fn compare_rates_for_anchors(
         env: Env,

@@ -31,6 +31,8 @@ enum StorageKey {
     ContractConfig,
     SessionConfig,
     HealthStatus(Address),
+    SubjectCount(Address),
+    SubjectAttestation(Address, u64),
     CredentialPolicy(Address),
     SecureCredential(Address),
     AnchorMetadata(Address),
@@ -76,6 +78,12 @@ impl StorageKey {
             StorageKey::SessionConfig => (soroban_sdk::symbol_short!("SESSCFG"),).into_val(env),
             StorageKey::HealthStatus(addr) => {
                 (soroban_sdk::symbol_short!("HEALTH"), addr).into_val(env)
+            }
+            StorageKey::SubjectCount(addr) => {
+                (soroban_sdk::symbol_short!("SUBCNT"), addr).into_val(env)
+            }
+            StorageKey::SubjectAttestation(addr, idx) => {
+                (soroban_sdk::symbol_short!("SUBATST"), addr, *idx).into_val(env)
             }
             StorageKey::CredentialPolicy(addr) => {
                 (soroban_sdk::symbol_short!("CREDPOL"), addr).into_val(env)
@@ -152,14 +160,47 @@ impl Storage {
             Self::PERSISTENT_LIFETIME,
             Self::PERSISTENT_LIFETIME,
         );
+
+        // Maintain per-subject index so list_attestations can paginate (#1163).
+        let count_key = StorageKey::SubjectCount(attestation.subject.clone()).to_storage_key(env);
+        let subject_index: u64 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0u64);
+        let index_key =
+            StorageKey::SubjectAttestation(attestation.subject.clone(), subject_index)
+                .to_storage_key(env);
+        env.storage().persistent().set(&index_key, &id);
+        env.storage().persistent().extend_ttl(
+            &index_key,
+            Self::PERSISTENT_LIFETIME,
+            Self::PERSISTENT_LIFETIME,
+        );
+        env.storage()
+            .persistent()
+            .set(&count_key, &(subject_index + 1));
+        env.storage().persistent().extend_ttl(
+            &count_key,
+            Self::PERSISTENT_LIFETIME,
+            Self::PERSISTENT_LIFETIME,
+        );
     }
 
     pub fn get_attestation(env: &Env, id: u64) -> Result<Attestation, Error> {
         let key = StorageKey::Attestation(id).to_storage_key(env);
-        env.storage()
+        let attestation = env
+            .storage()
             .persistent()
             .get(&key)
-            .ok_or(Error::AttestationNotFound)
+            .ok_or(Error::AttestationNotFound)?;
+        // Bump TTL on read so actively-queried attestations don't expire (#630).
+        env.storage().persistent().extend_ttl(
+            &key,
+            Self::PERSISTENT_LIFETIME,
+            Self::PERSISTENT_LIFETIME,
+        );
+        Ok(attestation)
     }
 
     pub fn mark_hash_used(env: &Env, hash: &BytesN<32>) {
@@ -429,6 +470,41 @@ impl Storage {
     pub fn get_health_status(env: &Env, anchor: &Address) -> Option<HealthStatus> {
         let key = StorageKey::HealthStatus(anchor.clone()).to_storage_key(env);
         env.storage().persistent().get(&key)
+    }
+
+    /// Return the number of attestations recorded for `subject`.
+    pub fn get_subject_attestation_count(env: &Env, subject: &Address) -> u64 {
+        let key = StorageKey::SubjectCount(subject.clone()).to_storage_key(env);
+        env.storage().persistent().get(&key).unwrap_or(0u64)
+    }
+
+    /// Return the attestation ID at position `index` in `subject`'s index, if present.
+    /// Also bumps the TTL on both the index entry and the main attestation entry (#1163).
+    pub fn get_subject_attestation_at(
+        env: &Env,
+        subject: &Address,
+        index: u64,
+    ) -> Option<Attestation> {
+        let index_key =
+            StorageKey::SubjectAttestation(subject.clone(), index).to_storage_key(env);
+        let attestation_id: u64 = env.storage().persistent().get(&index_key)?;
+        // Bump TTL on the index entry so it doesn't expire while the subject is active.
+        env.storage().persistent().extend_ttl(
+            &index_key,
+            Self::PERSISTENT_LIFETIME,
+            Self::PERSISTENT_LIFETIME,
+        );
+        let main_key = StorageKey::Attestation(attestation_id).to_storage_key(env);
+        let attestation: Option<Attestation> = env.storage().persistent().get(&main_key);
+        // Bump TTL on read so actively-listed attestations don't expire (#1163).
+        if attestation.is_some() {
+            env.storage().persistent().extend_ttl(
+                &main_key,
+                Self::PERSISTENT_LIFETIME,
+                Self::PERSISTENT_LIFETIME,
+            );
+        }
+        attestation
     }
 
     pub fn set_credential_policy(env: &Env, policy: &CredentialPolicy) {
